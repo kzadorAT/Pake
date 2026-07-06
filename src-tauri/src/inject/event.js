@@ -1371,9 +1371,7 @@ document.addEventListener("DOMContentLoaded", () => {
       // Fire-and-forget the original method so Service Worker event listeners
       // (e.g. notificationclick) still fire
       if (typeof origShowNotification === "function") {
-        origShowNotification
-          .call(this, title, options)
-          .catch(() => {});
+        origShowNotification.call(this, title, options).catch(() => {});
       }
 
       return Promise.resolve();

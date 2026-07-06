@@ -3,10 +3,7 @@ import path from "path";
 import { runInNewContext } from "node:vm";
 import { describe, expect, it, vi } from "vitest";
 
-const EVENT_JS_PATH = path.join(
-  process.cwd(),
-  "src-tauri/src/inject/event.js",
-);
+const EVENT_JS_PATH = path.join(process.cwd(), "src-tauri/src/inject/event.js");
 
 /**
  * Minimal Event polyfill for the sandbox so Notification onclick callbacks
@@ -103,9 +100,7 @@ function loadNotificationHelpers({
   MockMutationObserver._getInstances = () => mutationObserverInstances;
 
   // --- Title element stub ---
-  const titleElement = withTitleElement
-    ? { textContent: initialTitle }
-    : null;
+  const titleElement = withTitleElement ? { textContent: initialTitle } : null;
 
   // --- Body stub with proper appendChild tracking ---
   const body = createElement("body");
@@ -131,8 +126,7 @@ function loadNotificationHelpers({
     clearInterval: vi.fn(),
     scrollTo: vi.fn(),
     navigator: {
-      userAgent:
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+      userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
       language: "en-US",
     },
     window: {
