@@ -55,6 +55,8 @@ function loadEventHelpers({
     Notification: function Notification() {},
     setTimeout,
     clearTimeout,
+    setInterval: () => 42,
+    clearInterval: () => {},
     scrollTo: () => {},
     navigator: {
       userAgent,
@@ -87,6 +89,7 @@ function loadEventHelpers({
       createElement,
       getElementById: (id) => elementsById.get(id) || null,
       getElementsByTagName: () => [{ style: {} }],
+      querySelector: () => null,
       body,
       execCommand: () => {},
     },

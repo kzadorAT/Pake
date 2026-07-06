@@ -206,3 +206,15 @@ pub fn set_zoom(window: WebviewWindow, percent: f64) -> Result<(), String> {
         .set_zoom(factor)
         .map_err(|e| format!("Failed to set zoom: {}", e))
 }
+
+#[command]
+pub fn focus_window(app: AppHandle) -> Result<(), String> {
+    let window = app
+        .get_webview_window("pake")
+        .ok_or("Main window not found")?;
+    let _ = window.unminimize();
+    let _ = window.show();
+    window
+        .set_focus()
+        .map_err(|e| format!("Failed to focus window: {}", e))
+}

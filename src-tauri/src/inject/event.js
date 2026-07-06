@@ -1178,6 +1178,13 @@ document.addEventListener("DOMContentLoaded", () => {
   const invoke = window.__TAURI__?.core?.invoke;
   if (!invoke) return;
 
+  // Task 1: Set permission as a direct property immediately so synchronous
+  // reads from site code (e.g. Discord) return "granted" before our own
+  // Object.defineProperty below takes effect.
+  try {
+    if (window.Notification) window.Notification.permission = "granted";
+  } catch (_) {}
+
   let permVal = "granted";
   let lastNotifTime = 0;
   let lastNotif = null;
@@ -1185,6 +1192,10 @@ document.addEventListener("DOMContentLoaded", () => {
   // notifications-driven counts auto-clear on the next user interaction.
   let pageManagedBadge = false;
   let autoBadgeActive = false;
+  // Shared queue for onclick callbacks from Notification, Service Worker,
+  // and title-change notifications. Survives notification-object replacement
+  // and is drained on focus / visibilitychange.
+  const pendingClickCallbacks = [];
 
   const normalizeBadgeCount = (count) => {
     if (typeof count !== "number" || !Number.isFinite(count)) {
@@ -1210,10 +1221,37 @@ document.addEventListener("DOMContentLoaded", () => {
     return invoke("increment_dock_badge").catch(() => {});
   };
 
-  window.addEventListener("focus", () => {
-    if (lastNotif?.onclick && Date.now() - lastNotifTime < 5000) {
-      lastNotif.onclick(new Event("click"));
+  // --- Task 4: Improved notification click handling ---
+  // Drains the pendingClickCallbacks queue on focus or when the page becomes
+  // visible. Removes the previous 5-second window so callbacks fire whenever
+  // the user interacts with the OS notification.
+  function firePendingClickCallbacks() {
+    let cb;
+    while ((cb = pendingClickCallbacks.shift()) !== undefined) {
+      try {
+        cb(new Event("click"));
+      } catch (_) {}
+    }
+    // Legacy path for direct onclick assignment on the last notification
+    if (lastNotif && typeof lastNotif.onclick === "function") {
+      try {
+        lastNotif.onclick(new Event("click"));
+      } catch (_) {}
       lastNotif = null;
+    }
+  }
+
+  window.addEventListener("focus", () => {
+    firePendingClickCallbacks();
+    invoke("focus_window").catch(() => {});
+  });
+
+  // visibilitychange covers platforms where the page regains visibility before
+  // the window focus event fires (e.g. WebView2 notification click handling).
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) {
+      firePendingClickCallbacks();
+      invoke("focus_window").catch(() => {});
     }
   });
 
@@ -1225,6 +1263,10 @@ document.addEventListener("DOMContentLoaded", () => {
   document.addEventListener("click", clearAutoBadge, true);
   document.addEventListener("keydown", clearAutoBadge, true);
 
+  // --- Task 1: Enhanced Notification polyfill ---
+  // The onclick setter intercepts site-assigned handlers and pushes them into
+  // the shared pendingClickCallbacks queue so they survive across notification
+  // object replacements and fire without a time restriction.
   const wrappedNotification = function (title, options) {
     const body = options?.body || "";
     let icon = options?.icon || "";
@@ -1232,8 +1274,17 @@ document.addEventListener("DOMContentLoaded", () => {
       icon = window.location.origin + icon;
     }
 
+    let _onclick = null;
     const notif = {
-      onclick: null,
+      get onclick() {
+        return _onclick;
+      },
+      set onclick(fn) {
+        _onclick = fn;
+        if (typeof fn === "function") {
+          pendingClickCallbacks.push(fn);
+        }
+      },
       onclose: null,
       onshow: null,
       onerror: null,
@@ -1252,6 +1303,9 @@ document.addEventListener("DOMContentLoaded", () => {
   };
 
   wrappedNotification.requestPermission = async () => "granted";
+  // Direct property as extra safety for environments that enumerate properties
+  // before the accessor takes effect
+  wrappedNotification.permission = "granted";
   Object.defineProperty(wrappedNotification, "permission", {
     enumerable: true,
     get: () => permVal,
@@ -1267,6 +1321,131 @@ document.addEventListener("DOMContentLoaded", () => {
       value: wrappedNotification,
     });
   } catch (_) {}
+
+  // --- Task 2: ServiceWorkerRegistration.showNotification polyfill ---
+  // Discord and other PWA-like sites use this API instead of new Notification().
+  // Routes through the same send_notification invoke and badge increment.
+  if (
+    typeof ServiceWorkerRegistration !== "undefined" &&
+    ServiceWorkerRegistration.prototype
+  ) {
+    const origShowNotification =
+      ServiceWorkerRegistration.prototype.showNotification;
+
+    ServiceWorkerRegistration.prototype.showNotification = function (
+      title,
+      options,
+    ) {
+      const body = options?.body || "";
+      let icon = options?.icon || "";
+      if (icon.startsWith("/")) {
+        icon = window.location.origin + icon;
+      }
+      const tag = options?.tag || "";
+
+      // Build a notification-like object so onclick flows through the
+      // pendingClickCallbacks queue when the window regains focus.
+      let _onclick = null;
+      const notif = {
+        get onclick() {
+          return _onclick;
+        },
+        set onclick(fn) {
+          _onclick = fn;
+          if (typeof fn === "function") {
+            pendingClickCallbacks.push(fn);
+          }
+        },
+      };
+
+      lastNotifTime = Date.now();
+      lastNotif = notif;
+
+      // Task 5: Badge API synergy - increment badge for SW notifications
+      invoke("send_notification", {
+        params: { title, body, icon, tag },
+      })
+        .then(() => incrementAutoBadge())
+        .catch(() => {});
+
+      // Fire-and-forget the original method so Service Worker event listeners
+      // (e.g. notificationclick) still fire
+      if (typeof origShowNotification === "function") {
+        origShowNotification
+          .call(this, title, options)
+          .catch(() => {});
+      }
+
+      return Promise.resolve();
+    };
+  }
+
+  // --- Task 3: Document title change notification fallback ---
+  // Sites like Discord change document.title to "(1) Discord" for new
+  // messages. When the page is hidden, this fallback sends a Tauri
+  // notification containing the new title and origin URL.
+  let previousTitle = document.title;
+  let titleNotifCooldown = 0;
+
+  function handleTitleChange(newTitle) {
+    if (typeof newTitle !== "string") return;
+    if (newTitle === previousTitle) return;
+
+    const now = Date.now();
+    if (now - titleNotifCooldown < 3000) return; // 3-second cooldown
+
+    // Detect notification-like patterns: parenthesized number (1), (2),
+    // @-mentions, "mention", "message", "alert", "notification"
+    const hasNotifIndicator =
+      /\([1-9]\d*\)/.test(newTitle) ||
+      /@|mention|message|alert|notification/i.test(newTitle);
+
+    if (hasNotifIndicator && document.hidden) {
+      titleNotifCooldown = now;
+
+      // Task 5: Badge API synergy - increment badge for title-change
+      // notifications
+      invoke("send_notification", {
+        params: {
+          title: newTitle,
+          body: "From: " + window.location.origin,
+          icon: "",
+          tag: "pake-title-change",
+        },
+      })
+        .then(() => incrementAutoBadge())
+        .catch(() => {});
+    }
+
+    previousTitle = newTitle;
+  }
+
+  // Observe the <title> element for DOM/characterData mutations
+  const titleEl = document.querySelector("title");
+  if (titleEl) {
+    const titleObserver = new MutationObserver(() => {
+      handleTitleChange(document.title);
+    });
+    titleObserver.observe(titleEl, {
+      childList: true,
+      subtree: true,
+      characterData: true,
+    });
+  }
+
+  // Fallback polling for SPAs that replace the <title> element entirely
+  // (React Helmet, Vue Meta, etc.)
+  let titlePollInterval = null;
+  function startTitlePolling() {
+    if (titlePollInterval) return;
+    titlePollInterval = setInterval(() => {
+      const currentTitle = document.title;
+      if (currentTitle !== previousTitle) {
+        handleTitleChange(currentTitle);
+      }
+    }, 1000);
+  }
+  startTitlePolling();
 
   // Web Badging API: https://wicg.github.io/badging/
   // setAppBadge() with no argument shows an indicator dot; with a number,

@@ -68,6 +68,8 @@ function loadEventHelpers({
     Notification: function Notification() {},
     setTimeout,
     clearTimeout,
+    setInterval: () => 42,
+    clearInterval: () => {},
     scrollTo: () => {},
     navigator: {
       userAgent,
@@ -136,6 +138,7 @@ function loadEventHelpers({
       }),
       getElementById: (id) => elementsById.get(id) || null,
       getElementsByTagName: () => [{ style: {} }],
+      querySelector: () => null,
       body,
       activeElement,
       execCommand: (command, showUI, value) => {
